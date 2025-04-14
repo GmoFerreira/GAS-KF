@@ -1,1 +1,337 @@
+library(readr)
+library(fracdiff)
+library(zoo)
+
+toBibtex(citation("fracdiff"))
+HadCRUT.4.6.0.0.monthly_ns_avg <- read.table("~/Dropbox/Tesis Yotan/Long-Memory/AplicacioĢ€n/HadCRUT.4.6.0.0.monthly_ns_avg.txt", quote="\"", comment.char="")
+View(HadCRUT.4.6.0.0.monthly_ns_avg)
+names(HadCRUT.4.6.0.0.monthly_ns_avg)
+
+
+fecha<-HadCRUT.4.6.0.0.monthly_ns_avg$V1
+data<-HadCRUT.4.6.0.0.monthly_ns_avg$V2
+length(data)
+
+write.csv(data, "data.csv")
+
+
+library(lubridate)
+Fecha <- ym(fecha)  # Use the appropriate function based on format
+
+
+#fecha<-gsub("sept", "sep", fecha)
+#ipsa1<-as.numeric(gsub(",",".",gsub("\\.", "",ipsa$MĆ­nimo)) )
+#date<-as.Date(fecha)
+
+datos<-data.frame(Fecha = Fecha , Temp = data)
+class(datos$Fecha)
+
+View(datos)
+
+par(mfrow=c(1,1))
+par(mar=c(5,5,5,5), cex=2.5)
+plot(datos$Fecha, datos$Temp,  bty = "n", main = "", las = 1, lwd = 3, pch = 20, cex.lab=3, ann=FALSE, type="l")
+mtext(side=1, text = "Time", line=3, cex=2.5)
+mtext(side=2, text = "Temp.anomalies", line=3, cex=2.5)
+
+ACF<-acf(datos$Temp, plot = FALSE, lag=50)
+lag<-rep(0:50, each=1)
+
+par(mar=c(5,5,5,5), cex=2.5)
+plot(lag, ACF$acf,  bty = "n", main = "", las = 1, lwd = 3, pch = 20, cex.lab=3, ann=FALSE, type="h")
+mtext(side=1, text = "Lag", line=3, cex=2.5)
+mtext(side=2, text = "ACF", line=3, cex=2.5)
+
+##### ACF por bloque
+ACF1<-acf(datos$Temp[1:500], plot = FALSE, lag=50)
+ACF2<-acf(datos$Temp[510:1010], plot = FALSE, lag=50)
+ACF3<-acf(datos$Temp[1020:1520], plot = FALSE, lag=50)
+ACF4<-acf(datos$Temp[1564:2064], plot = FALSE, lag=50)
+
+par(mar=c(5,5,5,5), cex=2.5)
+plot(lag, ACF1$acf,  bty = "n", main = "", las = 1, lwd = 3, pch = 20, cex.lab=3, ann=FALSE, type="h")
+mtext(side=1, text = "Lag", line=3, cex=2.5)
+mtext(side=2, text = "ACF", line=3, cex=2.5)
+
+par(mar=c(5,5,5,5), cex=2.5)
+plot(lag, ACF2$acf,  bty = "n", main = "", las = 1, lwd = 3, pch = 20, cex.lab=3, ann=FALSE, type="h")
+mtext(side=1, text = "Lag", line=3, cex=2.5)
+mtext(side=2, text = "ACF", line=3, cex=2.5)
+
+par(mar=c(5,5,5,5), cex=2.5)
+plot(lag, ACF3$acf,  bty = "n", main = "", las = 1, lwd = 3, pch = 20, cex.lab=3, ann=FALSE, type="h")
+mtext(side=1, text = "Lag", line=3, cex=2.5)
+mtext(side=2, text = "ACF", line=3, cex=2.5)
+
+par(mar=c(5,5,5,5), cex=2.5)
+plot(lag, ACF4$acf,  bty = "n", main = "", las = 1, lwd = 3, pch = 20, cex.lab=3, ann=FALSE, type="h")
+mtext(side=1, text = "Lag", line=3, cex=2.5)
+mtext(side=2, text = "ACF", line=3, cex=2.5)
+
+#### Dinamica d
+x =datos$Temp
+T. = length(x)
+N  = 600
+S  = 150
+M  = trunc((T.-N)/S+1)
+d = vector("numeric")
+sigma = vector("numeric")
+
+estacionario<-fracdiff(x)
+str(estacionario)
+G<-estacionario$d
+
+for(j in 1:M){
+  fit = fracdiff(x[(S*(j-1)+1):(S*(j - 1)+N)])
+  d[j] = fit$d
+  sigma[j] = summary(fit)$sigma
+}
+
+j = 1:M
+t = S * (j - 1) + N/2
+u. = t/T.
+u = t
+
+
+par(mfrow=c(1,1))
+par(mar=c(5,5,5,5), cex=3)
+plot(t,d , xlim=c(0,T.), ylim =c(0.3,max(d)+0.1), bty = "n",main = "", las = 1, lwd = 3, ylab = "", xlab="",cex.lab = 5, pch = 20)
+mtext(side=1, text = "Time", line=3, cex=3)
+mtext(side=2, text = expression(d(u)), line=3, cex=3)
+abline(h=G,lwd=2,lty=2)
+
+library(fracdiff)
+
+
+##############################################
+# Ajuste-Analisis de residuos
+###############################################
+model=lsfn.kalman(x, m = 20, start = list(beta.0 = 0.42, beta.1 = 0.065, alpha.0 = 0.01, alpha.1 =0.00)) 	 
+model
+
+d.=model[1] + model[2]*u. 
+
+par(mfrow=c(1,1))
+par(mar=c(5,5,5,5), cex=3)
+plot(t,d , xlim=c(0,T.), ylim =c(0.3,max(d)+0.1), bty = "n",main = "", las = 1, lwd = 3, ylab = "", xlab="",cex.lab = 5, pch = 20)
+mtext(side=1, text = "Time", line=3, cex=3)
+mtext(side=2, text = expression(d(u)), line=3, cex=3)
+abline(h=G,lwd=2,lty=2)
+lines(d.~ (time(x))[u], lwd = 3, type = "l", pch = 20)
+
+
+ajus1<-lsfn.kalman.filter_reg(param=model, series=x, m = 20, k=0, nsample=T.)$y.hat 
+length(ajus1)  
+
+### LSFN
+par(mfrow=c(1,1))
+par(mar=c(5,5,5,5), cex=3)
+plot(datos$Fecha, datos$Temp,  bty = "n", main = "", las = 1, lty=2, lwd = 1, pch = 20, cex.lab=3, ann=FALSE, type="l")
+mtext(side=1, text = "Time", line=3, cex=3)
+mtext(side=2, text = "Temp.anomalies", line=3, cex=3)
+lines(datos$Fecha,ajus1,col="darkgreen",lty=1,lwd=2)
+legend("topleft", legend=c("Temp.anomalies", "LSFN model fitted values"),
+       col=c("black","darkgreen"), lty=c(2,1), cex=0.8,bty = "n", lwd = 1)
+
+
+#### Stationary
+source("FN_Stationary.R")
+
+model<-lslm.kalman(x,T.,m=15, start=list(d.0=0.45, sigma.0=0.2))
+model
+ajus2=fit.fnkalman(model, x, m=15)
+
+par(mfrow=c(1,1))
+par(mar=c(5,5,5,5), cex=3)
+plot(datos$Fecha, datos$Temp,  bty = "n", main = "", las = 1, lty=2, lwd = 1, pch = 20, cex.lab=3, ann=FALSE, type="l")
+mtext(side=1, text = "Time", line=3, cex=3)
+mtext(side=2, text = "Temp.anomalies", line=3, cex=3)
+lines(datos$Fecha,ajus2,col='#FFA500',lty=1,lwd=2)
+legend("topleft", legend=c("Temp.anomalies", "FN model fitted values"),
+       col=c("black",'#FFA500'), lty=c(2,1), cex=0.8,bty = "n", lwd = 1)
+
+##### TVFN
+library(readr)
+Fitted <- read_csv("Fitted_Final.csv")
+View(Fitted)
+
+par(mfrow=c(1,1))
+par(mar=c(5,5,5,5), cex=3)
+plot(datos$Fecha, datos$Temp,  bty = "n", main = "", las = 1, lty=2, lwd = 1, pch = 20, cex.lab=3, ann=FALSE, type="l")
+mtext(side=1, text = "Time", line=3, cex=3)
+mtext(side=2, text = "Temp.anomalies", line=3, cex=3)
+lines(datos$Fecha,Fitted$haty,col="red",lty=1,lwd=2)
+legend("topleft", legend=c("Temp.anomalies", "FN model fitted values"),
+       col=c("black","red"), lty=c(2,1), cex=0.8,bty = "n", lwd = 1)
+
+
+
+
+##### Accurracy
+library(forecast)
+## LSFN
+accuracy(datos$Temp,ajus1)
+### Stationary
+accuracy(datos$Temp,ajus2)
+### TVFN
+accuracy(datos$Temp,Fitted$haty)
+
+
+############################
+#Estimador de Kalman 
+############################
+
+lsfn.kalman <-function(series1, m = m, start = list(beta.0 = beta.0, beta.1 = beta.1, alpha.0 = alpha.0, alpha.1 = alpha.1)){ 	 
+  
+  start = c(start$beta.0, start$beta.1, start$alpha.0, start$alpha.1) 	 
+  aux <-nlminb(start = start, lsfn.kalman.loglik, series = series1, m = m)
+  
+  #aux1 <-lsfn.kalman.loglik.print(x = aux$par, series = series1, m = m) 	 
+  #loglik <-aux1$loglik 	 
+  #res <-aux1$res 	 
+  #res.stand <-aux1$res.stand 	 
+  #delta <-aux1$delta 	 
+  #hat.y <-aux1$hat.y 	 
+  #convergence <-aux$convergence 	 
+  par <-aux$par 	 
+  suppressWarnings(return(par)) 	 
+  #suppressWarnings(return(par, res, res.stand, delta, loglik, hat.y, convergence)) 	 
+}
+
+###################
+#lsfn.kalman.loglik
+###################
+
+psi=function (d, m) 
+{
+  c(1, gamma(d + 1:m)/(gamma(d) * gamma(1:m + 1)))
+}
+
+psi
+
+lsfn.kalman.loglik <-function(x, series, m = m, nsample=length(series)){ 	 
+  M <-m+1
+  
+  beta.0 <-x[1] 
+  beta.1 <-x[2] 
+  alpha.0 <-x[3] 
+  alpha.1 <-x[4]
+  
+  ########################### 
+  # Verifying d in (0,1/2) # 
+  ########################### 			 
+  beta.min <-beta.0 -max(0, -beta.1) 
+  beta.max <-beta.0 -min(.49, .49 -beta.1) 
+  alpha.sum <-alpha.0+alpha.1 			 
+  if((beta.min < 0) || (beta.max >= 0) || (alpha.sum == 0) ){ 
+    loglik = 100000000000. } 			 
+  else{ 			 
+    d <-vector("numeric") 
+    d <-beta.0 + beta.1 * (1:nsample)/nsample 			 
+    sigma <-vector("numeric") 
+    sigma <-alpha.0 + alpha.1 * (1:nsample)/nsample 
+    sigma[(nsample+1)]<-sigma[nsample] 			 
+    Omega <-matrix(0, nrow = M, ncol = M) 	 
+    diag(Omega) <-sigma[1]^2 	 
+    X <-rep(0, M) 	 
+    delta <-vector("numeric") ## Vector de Delta's 	 
+    hat.y <-vector("numeric") ## vector de Ajuste's 	 
+    #psi=NULL
+    for(i in 1:nsample){ 	  
+      #k <-1:m
+      #psi <-exp(lgamma(d[i]+k) -lgamma(k + 1)-lgamma(d[i]))	 
+      g <-sigma[i]*rev(psi(d[i], m))
+      aux <-Omega %*% g 	 
+      delta[i] <-g %*% aux 	 
+      Theta <-c(aux[2:M],0) 	 
+      aux <-matrix(0, nrow = M, ncol = M) 	 
+      aux[1:m,1:m] <-Omega[2:M,2:M] 	 
+      aux[M,M] <-1 	 
+      if(is.na(series[i])){ 	 
+        Omega <-aux 	 
+        hat.y[i]<-t(g)%*%X 	 
+        X <-c(X[2:M],0) 	 
+      } 	 
+      else{ 	 
+        Omega <-aux - Theta %*% t(Theta)/delta[i] 	 
+        hat.y[i]<-t(g)%*%X 	 
+        aux <-c(X[2:M],0) 	 
+        X <-aux + Theta * (series[i]-hat.y[i]) / delta[i] 	 
+      } 	 
+    } 	 
+    loglik <-sum(log(delta)) + sum(na.exclude((series-hat.y)^2/delta)) 	 
+  }
+  return(loglik) 	 
+} 	 
+
+#################################
+
+
+lsfn.kalman.filter_reg<-function(param, series, m = m, k=k, nsample=n) 
+{
+  d <-vector("numeric") 
+  sigma <-vector("numeric") 
+  
+  u<-1:(nsample+k)/(nsample+k)
+  
+  d <-param[1] + param[2] * u 
+  sigma <-param[3] + param[4] *u  
+  
+  ind.d = (d < 0 | d > 0.5)
+  ind.s = (sigma < 0)
+  if (sum(ind.d) + sum(ind.s) == 0) {
+    M <- m + 1
+    sigma[(nsample + 1)] <- sigma[nsample]
+    Omega <- matrix(0, nrow = M, ncol = M)
+    diag(Omega) <- sigma[1]^2
+    X <- rep(0, M)
+    delta <- vector("numeric")
+    hat.y <- vector("numeric")
+    
+    for (i in 1:nsample) {
+      
+      g <- sigma[i] * rev(psi(d[i], m))
+      aux <- Omega %*% g
+      delta[i] <- g %*% aux
+      Theta <- c(aux[2:M], 0)
+      aux <- matrix(0, nrow = M, ncol = M)
+      aux[1:m, 1:m] <- Omega[2:M, 2:M]
+      aux[M, M] <- 1
+      if (is.na(series[i])) {
+        Omega <- aux
+        hat.y[i] <- t(g) %*% X   
+        X <- c(X[2:M], 0)
+      }
+      else {
+        Omega <- aux - Theta %*% t(Theta)/delta[i]
+        hat.y[i] <- t(g) %*% X  
+        aux <- c(X[2:M], 0)
+        X <- aux + Theta * (series[i] - hat.y[i])/delta[i]
+      }
+    }
+    loglik <- sum(log(delta)) + sum(na.exclude((series[1:nsample] - 
+                                                  hat.y[1:nsample])^2/delta))
+    res <- (series[1:nsample] - hat.y[1:nsample])
+    res.stand <- res/sigma[1:nsample]
+    OUT = NULL
+    OUT$res = res
+    OUT$res.stand = res.stand
+    OUT$y.hat = hat.y
+    OUT$delta = delta
+    OUT$par = param
+    OUT$loglik = loglik
+    OUT$truncation = m
+    OUT$call = match.call()
+    OUT$method = c("Kalman")
+    class(OUT) = c("LSmodel")
+  }
+  else {
+    OUT = NULL
+    OUT$loglik = 10^10
+  }
+  OUT
+}
+
+
+
 
