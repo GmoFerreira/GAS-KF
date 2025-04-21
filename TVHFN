@@ -1,1 +1,220 @@
+# Importamos las librerías
+using Random
+using LinearAlgebra
+using DataFrames
+using Plots
+using Distributions
+using NLopt
+using SpecialFunctions
+using StatsPlots
+
+using CSV
+using LaTeXStrings
+using StatsBase
+using CategoricalArrays
+using RCall
+using SparseArrays
+
+function psi(d)
+    Psi = zeros(1,171)
+    Psi[1] = 1.0
+    for j in 1:170
+        Psi[j+1] = gamma(j+d)/(gamma(j+1)*gamma(d)) 
+    end
+    return Psi
+end
+
+# Matriz Ft
+function sim_Ft(m::Int64)
+    Ft = spdiagm(-1 => ones(m))
+    return Ft
+end
+
+# Matriz Q
+function sim_Qt(m::Int64)
+    Qt = spzeros(m+1, m+1) 
+    Qt[1,1] = 1.0
+    return Qt
+end
+
+
+function Simular(n::Int64, ω::Float64, A::Float64, B::Float64, d::Float64, seed::Int64)
+    Random.seed!(seed)
+    # Inicializamos
+    Y = vec(zeros(n, 1))
+    𝜃 = vec(zeros(n, 1))
+    𝜃[1] = 1.0
+    
+    # Ruido normal
+    𝜀 = rand(Normal(0, 1), n+170)
+    
+    # vector de psi_j
+    Psi = psi(d)
+    
+    # t = 1
+    Y[1,:] = Psi*𝜀[171:-1:1]
+    st = -1 + Y[1]*𝜀[171]
+    
+    # t = 2
+    𝜃[2] = ω + A*st + B*𝜃[1]
+    Gt = 𝜃[2]*Psi
+    
+    Y[2,:] .=  Gt*𝜀[172:-1:2]
+    
+    for t in 2:(n-1)
+        st = -(1/𝜃[t])+ (Y[t]*𝜀[t+170])/(𝜃[t])^2
+        𝜃[t+1] = ω + A*st + B*𝜃[t]
+        Gt = 𝜃[t+1]*Psi
+        Y[t+1,:] = Gt*𝜀[t+171:-1:(t+1)]
+    end
+    return Dict(:Y => Y, :𝜃 => 𝜃)
+end
+
+######### Kalman Filter
+
+function KalmanOF_TVFI(P::Vector{Float64}, grad::Union{Nothing, Vector{Float64}}, Psi, Y::Vector{Float64}, n::Int64, m::Int64,
+    Ft::Union{Matrix{Float64},SparseMatrixCSC{Float64, Int64}}, Qt::Union{Matrix{Float64},SparseMatrixCSC{Float64, Int64}})
+    
+    ω = P[1]; A = P[2]; B = P[3]; d = P[4]
+    Ft = sim_Ft(m)
+    Ωt = sim_Qt(m)
+  
+    # primera iteración
+    vt = Y[1]
+    𝜃t = 1.0
+    ∆t = 1.0
+    inv∆t = ∆t^(-1)
+    L = (1/2)*(log(∆t)+vt^2*inv∆t)
+    Gt = Psi
+    dGt = Psi' # este es constante
+    
+    Xtt = Ωt*Gt'*inv∆t*vt
+    
+    d∆t = (Gt*Ωt)*dGt
+    
+    s1 = d∆t'*inv∆t^2*(vt^2-∆t)
+    
+    𝜃t = ω + A*s1[1] + B*𝜃t
+    
+    Gt = 𝜃t*Psi
+    hatX = Ft*Xtt
+    
+    ∆t = (Gt*Ωt*Gt')[1]
+    inv∆t = ∆t^(-1)
+
+    hatY = Gt*hatX
+    vt = Y[2]-hatY[1]
+    L += (1/2)*(log(∆t)+vt^2*inv∆t)
+    for t in 2:(n-1)
+        Xtt = hatX + Ωt*Gt'*inv∆t*vt
+        d∆t = (Gt*Ωt)*dGt
+        dvt = -hatX'*dGt
+        st = d∆t'*inv∆t^2*(vt^2-∆t).- dvt*inv∆t*vt
+        𝜃t = ω + A*st[1] + B*𝜃t
+
+        Gt = 𝜃t*Psi
+        ∆t = (Gt*Ωt*Gt')[1]
+        inv∆t = ∆t^(-1)
+
+        hatX = Ft*Xtt
+        hatY = Gt*hatX
+        vt = Y[t+1]-hatY[1]
+        L += (1/2)*(log(∆t)+vt^2*inv∆t)
+    end
+return L
+end
+
+##### Function to estimate the parameters
+
+function EstimacionMV(Pi::Vector{Float64}, Pm::Vector{Float64}, PM::Vector{Float64}, Y::Vector{Float64}, n::Int64, m::Int64)
+    Ft = sim_Ft(m)
+    Qt = sim_Qt(m)
+    Psi = psi(d)[:,1:m+1]
+    opt = Opt(:LN_BOBYQA, length(Pi))
+    lower_bounds!(opt, Pm)
+    upper_bounds!(opt, PM)
+    min_objective!(opt, (Pi, grad) -> KalmanOF_TVFI(Pi, grad, Psi, Y, n, m, Ft, Qt))
+    maxeval!(opt, 700) 
+    
+    (NLV, P_opt, status) = optimize(opt, Pi)
+    return Dict("Parámetros" => P_opt, "Log-Verosimilitud" => -NLV)
+end
+
+# Parámetros Escenario 1
+ωr1 = 0.6; Ar1 = 0.7; Br1 = 0.8; dr1 = 0.3
+Pr1 = [ωr1;Ar1;Br1;dr1]
+# Valores iniciales
+Pi1 = [0.5;0.65;0.7;0.3]
+
+# Parámetros Escenario 2
+ωr2 = 1.0; Ar2 = 0.6; Br2 = 0.75; dr2 = 0.4
+Pr2 = [ωr2;Ar2;Br2;dr2]
+
+# Valores iniciales
+Pi2 = [0.95;0.65;0.7;0.4]
+
+# Parámetros Mínimos y máximos
+Pm1 = [ωr1-ωr1*0.5, Ar1-Ar1*0.5, Br1-Br1*0.5, dr1-dr1*0.5]
+PM1 = [ωr1+ωr1*0.5, Ar1+Ar1*0.4, 0.99, dr1+dr1*0.5]
+
+Pm2 = [ωr2-ωr2*0.5, Ar2-Ar2*0.5, Br2-Br2*0.5, dr2-dr2*0.5]
+PM2 = [ωr2+ωr2*0.5, Ar2+Ar2*0.4, 0.99, dr2+dr2*0.5]
+
+######### Start of the simulation study ############################### 
+N = 1000; n = 1000; m = 10
+# Matrices que contengan las estimaciones por MV de cada escenario
+auxMV1 = zeros(N, 4)
+auxMV2 = zeros(N, 4)
+
+@time for i in 1:N
+    ########## Escenario 1 ########## 
+    Sim1 = Simular(n, ωr1, Ar1, Br1, dr1,i)
+    YR1 = vec(Sim1[:Y])
+    θR1 = vec(Sim1[:𝜃])
+
+    EstimacionP1 = EstimacionMV(Pi1, Pm1, PM1, YR1, n, m)
+    hatP1 = EstimacionP1[:"Parámetros"]
+    auxMV1[i,:] .= hatP1
+    
+    ########## Escenario 2 ########## 
+    Sim2 = Simular(n, ωr2, Ar2, Br2, dr2, i)
+    YR2 = vec(Sim2[:Y])
+    θR2 = vec(Sim2[:𝜃])
+
+    EstimacionP2 = EstimacionMV(Pi2, Pm2, PM2, YR2, n, m)
+    hatP2 = EstimacionP2[:"Parámetros"]
+    auxMV2[i,:] .= hatP2
+end
+
+Estimaciones1_1 = auxMV1
+Estimaciones1_2 = auxMV2
+println("Terminó")
+
+
+println("------------------------------------------------")
+println("Resumen de Estimación de Parámetros Escenario 1:")
+println("ω = 0.6; A = 0.7; B = 0.8; d = 0.3")
+println("------------------------------------------------")
+R"""
+print(summary($Estimaciones1_1[,1]))
+print(summary($Estimaciones1_1[,2]))
+print(summary($Estimaciones1_1[,3]))
+print(summary($Estimaciones1_1[,4]))
+"""
+println("------------------------------------------------")
+
+
+println("------------------------------------------------")
+println("Resumen de Estimación de Parámetros Escenario 1:")
+println("ω = 1.0; A = 0.6; B = 0.75; d = 0.4")
+println("------------------------------------------------")
+R"""
+print(summary($Estimaciones1_2[,1]))
+print(summary($Estimaciones1_2[,2]))
+print(summary($Estimaciones1_2[,3]))
+print(summary($Estimaciones1_2[,4]))
+"""
+println("------------------------------------------------")
+
+
 
