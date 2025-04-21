@@ -1,1 +1,243 @@
+using Random
+using LinearAlgebra
+using DataFrames
+using Plots
+using Distributions
+using NLopt
+using SpecialFunctions
+using StatsPlots
+
+using CSV
+using LaTeXStrings
+using StatsBase
+using CategoricalArrays
+using RCall
+using SparseArrays
+
+##### Function G and G'
+
+function psi(d,t,m::Int64)
+    psi = zeros(1,m+1)
+    psi[1] = 1.0
+    if t==1
+       return psi 
+    end
+        for j in 1:m
+            psi[j+1] = gamma(j+d[t])/(gamma(j+1)*gamma(d[t])) 
+        end
+    return psi
+end
+
+function dpsi(d,t,psi,m::Int64)
+    dt = d[t]
+        dpsi = zeros(1,m+1)
+        if t==1 
+        return dpsi
+    end
+        for j in 1:m
+            dpsi[j+1] = psi[j+1]*(1/dt + digamma(j+dt) - digamma(1+dt))
+        end
+        return dpsi
+end
+
+
+#### Function to simulate 
+
+function Simular(n::Int64, σ::Float64, ω::Float64, A::Float64, B::Float64, seed::Int64, m::Int64)
+    Random.seed!(seed)
+    𝜀 = rand(Normal(0, σ), n+m)
+    d = (zeros(n, 1))
+    Y = vec(zeros(n, 1))
+    d[1]=ω
+  
+   for t in 1:n-1
+            Psi = psi(d,t,m)
+            st = (𝜀[t+m]/σ)*sign((dpsi(d,t,Psi,m)*𝜀[t+m:-1:t])[1])
+       #println(st)
+            d[t+1] = ω + A*st + B*d[t]
+        #println(d[t+1])
+        if d[t+1] >= 0.5 && d[t+1] <= 0.0
+               break
+           end
+            Psi = psi(d,t+1,m)
+            Y[t+1,:] .= Psi*𝜀[t+m+1:-1:t+1]
+            
+        end
+    return Dict(:Y => Y, :dt => d)
+end
+
+# La función del vector fila
+function Gt_FI(m::Int64, dt::Float64)
+    Gt = zeros(1,m+1)
+    Gt[1] = 1.0
+    for j in 1:m
+        Gt[j+1] = gamma(j+dt)/(gamma(j+1)*gamma(dt))
+    end
+   return Gt 
+end
+# Derivada de Gt
+function dGt_FI(m::Int64, dt::Float64, Gt::Union{Matrix{Float64},Vector{Float64}})
+    dGt = zeros(m+1,1)
+    for j in 1:m
+        dGt[j+1] = Gt[j+1]*(1/dt + digamma(j+dt) - digamma(1+dt))
+    end
+   return vec(dGt) 
+end
+
+# Matriz Ft
+function sim_Ft(m::Int64)
+    Ft = spdiagm(-1 => ones(m))
+    return Ft
+end
+
+# Matriz Q
+function sim_Qt(m::Int64)
+    Qt = spzeros(m+1, m+1) 
+    Qt[1,1] = 1.0
+    return Qt
+end
+
+
+#### Score-drive Kalman Filter 
+
+function KalmanOF_TVFI(P::Vector{Float64}, grad::Union{Nothing, Vector{Float64}}, Y::Vector{Float64}, n::Int64, m::Int64,
+    Ft::Union{Matrix{Float64},SparseMatrixCSC{Float64, Int64}}, Qt::Union{Matrix{Float64},SparseMatrixCSC{Float64, Int64}})
+    ω = P[1]; A = P[2]; B = P[3]; σ = P[4] 
+
+    vt = Y[1]
+    LL = zeros(1,n)
+    LL[1] = (1/2)*(vt^2)
+    
+    # Para t =1
+    Δt = σ^2
+    invΔt = Δt^(-1)
+    Xtt = vec(zeros(m+1,1))
+    Xtt[1] = Y[1]
+    dt = ω
+    Ωt = σ^2*Qt
+
+    # para t = 2
+    Gt = Gt_FI(m,dt)
+    hatX = Ft*Xtt
+    hatY = Gt*hatX
+
+    vt = Y[2]-hatY[1]
+    LL[2] = (1/2)*(vt^2)
+    for t in 2:(n-1)
+        Xtt = hatX + Ωt*Gt'*invΔt*vt
+        dGt = dGt_FI(m, dt, Gt)
+        dvt = -hatX'*dGt
+        
+        if norm(dvt) > 0.0
+            ∇t = -dvt*invΔt*vt
+            It = dvt.^2*invΔt
+            st = It.^(-1/2).*∇t
+        else
+            st = [0.0]
+        end
+        
+        dt = ω + A*st[1] + B*dt
+        Gt = Gt_FI(m, dt)
+
+        hatX = Ft*Xtt
+        hatY = Gt*hatX
+        vt = Y[t+1]-hatY[1]
+        LL[t+1] = (1/2)*(vt^2)
+    end
+    L = n*log(σ) + sum(LL)*invΔt 
+    #println(L," ",P)
+    return L
+end
+
+#### Function to estimate the parameters
+
+function EstimacionMV(Pi::Vector{Float64}, Pm::Vector{Float64}, PM::Vector{Float64}, Y::Vector{Float64}, n::Int64, m::Int64)
+    Ft = sim_Ft(m)
+    Qt = sim_Qt(m)
+    opt = Opt(:LN_BOBYQA, length(Pi))
+    lower_bounds!(opt, Pm)
+    upper_bounds!(opt, PM)
+    min_objective!(opt, (Pi, grad) -> KalmanOF_TVFI(Pi, grad, Y, n, m, Ft, Qt))
+    maxeval!(opt, 700)  # Limita las evaluaciones
+    # Resolver el problema
+    (NLV, P_opt, status) = optimize(opt, Pi)
+    return Dict("Parámetros" => P_opt, "Log-Verosimilitud" => -NLV)
+end
+
+############## Simulation study
+
+# Parámetros Escenario 1
+ωr1 = 0.25; Ar1 = 0.05; Br1 = 0.12; σ = 2.0
+Pr1 = [ωr1;Ar1;Br1;σ]
+# Valores iniciales
+Pi1 = [0.2;0.07;0.13;2.5]
+
+
+# Parámetros Mínimos y máximos
+Pm1 = [0.1, 0.01, 0.05, 1.0]
+PM1 = [0.5, 0.2, 0.2, 3.0]
+
+
+
+# Parámetros Escenario 2
+ωr2 = 0.3; Ar2 = 0.01; Br2 = 0.3; σr2 = 1.5
+Pr2 = [ωr2;Ar2;Br2;σr2]
+# Valores iniciales
+Pi2 = [0.25;0.013;0.31;2.0]
+
+
+# Parámetros Mínimos y máximos
+Pm2 = [0.1, 0.0, 0.1, 1.0]
+PM2 = [0.5, 0.02, 0.4, 3.0]
+#ω = 0.3; A = 0.01; B = 0.3; σ = 1.5  ## scenario 2 strong long memory 0,3--0,46 
+
+
+
+############################### Inicio del estudio ############################### 
+N = 1000; n = 1500; m = 15
+# Matrices que contengan las estimaciones por MV de cada escenario
+auxMV11 = zeros(N, 4)
+auxMV22 = zeros(N, 4)
+
+
+
+@time for i in 1:N
+
+    ########## Escenario 1 ########## 
+    Sim1 = Simular(n, σr1, ωr1, Ar1, Br1,i,m)
+    YR1 = vec(Sim1[:Y])
+   
+    EstimacionP1 = EstimacionMV(Pi1, Pm1, PM1, YR1, n, m)
+    hatP1 = EstimacionP1[:"Parámetros"]
+    auxMV11[i,:] .= hatP1
+    
+
+    ########## Escenario 2 ########## 
+    Sim2 = Simular(n, σr2, ωr2, Ar2, Br2,i,m)
+    YR2 = vec(Sim2[:Y])
+    EstimacionP2 = EstimacionMV(Pi2, Pm2, PM2, YR2, n, m)
+    hatP2 = EstimacionP2[:"Parámetros"]
+    auxMV22[i,:] .= hatP2
+end
+
+
+Estimaciones1_1 = auxMV11
+Estimaciones2_2 = auxMV22
+
+println("Terminó")
+
+####### Summary 
+
+(mean(Estimaciones1_1[:, 1]), mean(Estimaciones1_1[:, 2]), mean(Estimaciones1_1[:, 3]), mean(Estimaciones1_1[:, 4]))
+(mean(Estimaciones2_2[:, 1]), mean(Estimaciones2_2[:, 2]), mean(Estimaciones2_2[:, 3]), mean(Estimaciones2_2[:, 4]))
+(std(Estimaciones1_1[:, 1]), std(Estimaciones1_1[:, 2]), std(Estimaciones1_1[:, 3]), std(Estimaciones1_1[:, 4]))
+(std(Estimaciones2_2[:, 1]), std(Estimaciones2_2[:, 2]), std(Estimaciones2_2[:, 3]), std(Estimaciones2_2[:, 4]))
+
+(mean(Estimaciones1_1[:, 1] .- ωr1),mean(Estimaciones1_1[:, 2] .- Ar1),mean(Estimaciones1_1[:, 3] .- Br1),mean(Estimaciones1_1[:, 4] .- σ))
+(mean(Estimaciones2_2[:, 1] .- ωr2),mean(Estimaciones2_2[:, 2] .- Ar2),mean(Estimaciones2_2[:, 3] .- Br2),mean(Estimaciones2_2[:, 4] .- σr2))
+
+sqrt(sum(Estimaciones1_1[:, 1].- ωr1)^2/N),sqrt(sum(Estimaciones1_1[:, 2].- Ar1)^2/N),sqrt(sum(Estimaciones1_1[:, 3].- Br1)^2/N),sqrt(sum(Estimaciones1_1[:, 4].- σ)^2/N)
+sqrt(sum(Estimaciones2_2[:, 1].- ωr2)^2/N),sqrt(sum(Estimaciones2_2[:, 2].- Ar2)^2/N),sqrt(sum(Estimaciones2_2[:, 3].- Br2)^2/N),sqrt(sum(Estimaciones2_2[:, 4].- σr2)^2/N)
+
+
 
