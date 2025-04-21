@@ -1,1 +1,454 @@
+# Importamos las librerías
+using Random
+using LinearAlgebra
+using DataFrames
+using Plots
+using Distributions
+using NLopt
+using SpecialFunctions
+using StatsPlots
 
+using CSV
+using LaTeXStrings
+using StatsBase
+using CategoricalArrays
+using RCall
+
+## Simulation function
+
+function ARGAS1(n::Int64, σ::Float64, ω::Float64, A::Float64, B::Float64, seed::Int64)
+    Random.seed!(seed)
+    # Inicializamos los vectores
+    Y = zeros(n, 1)
+    θ = zeros(n, 1)
+
+    # Ruido multivariado normal
+    𝜉 = rand(Normal(0, σ), n)
+
+    # Condiciones iniciales
+    θ[1] = 0
+    Y[1] = 𝜉[1]
+    s1 = 0
+    
+    # Valores Futuros del vector de parámetros
+    θ[2] = ω + A*s1 + B*θ[1]
+    Y[2] = θ[2]*Y[1] + 𝜉[2]
+
+    for t in 2:(n-1)
+        st = sign(Y[t-1])*𝜉[t]/abs(σ)
+        θ[t+1] = ω + A*st + B*θ[t]
+        Y[t+1] = θ[t+1]*Y[t] + 𝜉[t+1]
+    end
+    return Dict(:Y => Y, :θ => θ)
+end
+
+### Function to create the vector G_t
+
+function G_t2(t::Int64, hatθ::Vector{Float64}, m::Int64)
+    Gt = zeros(1, m+1)
+    Gt[1] = 1
+    
+    if t == 1
+        return Gt
+    end
+    prod_ = 1.0
+    if t < m
+        for k in 0:(t-2)
+            prod_ *= hatθ[t-k]
+            Gt[k+2] = prod_
+        end
+    else
+        for k in 0:(m-1)
+            prod_ *= hatθ[t-k]
+            Gt[k+2] = prod_
+        end
+    end
+    return Gt
+end
+
+### Function to create the derivative vector of G_t
+
+function dG_t2(t::Int64, hatθ::Vector{Float64}, m::Int64)
+    dGt = zeros(m+1) 
+    if t == 1
+        return dGt
+    end
+    dGt[2] = 1.0
+    if t == 2
+        return dGt
+    end
+    prod_v = 1.0
+    if t < m
+        for k in 1:(t-2)
+            prod_v *= hatθ[t-k]
+            dGt[k+2] = prod_v
+        end
+    else
+        for k in 1:(m-1)
+            prod_v *= hatθ[t-k]
+            dGt[k+2] = prod_v
+        end
+    end
+    return dGt
+end
+
+##### Kalaman Filter algorithm 
+
+function TVMA_KalmanOF2(P::Vector{Float64}, grad::Union{Nothing, Vector{Float64}},Y::Vector{Float64}, n::Int64, m::Int64,
+    Ft::Matrix{Float64}, Qt::Matrix{Float64})
+    ω = P[1]; A = P[2]; B = P[3]; σ = P[4]
+    # Inicialización de matrices
+    hatθ = zeros(1,n)
+    LL = zeros(1,n)
+    inv∆t = (σ^2)^(-1)
+    Gt = G_t2(1, vec(hatθ), m)
+
+    Qt[1,1] = σ^2 
+    Ω = σ^2*I(m+1) #Matrix{Float64}(I, m+1, m+1)
+    v = Y[1]
+    LL[1] = (1/2)*(v^2)
+
+    # Primera iteración
+    Xtt = Ω*Gt'*inv∆t*v
+    dGt = dG_t2(1, vec(hatθ), m)
+    
+    s1 = 0
+    hatθ[2] = ω + A*s1 + B*hatθ[1]
+     
+    Gt = G_t2(2, vec(hatθ), m)
+    hatX = Ft*Xtt
+    hatY = Gt*hatX
+    
+    Theta = Ft*Ω*Gt'
+    Ω = Ft*Ω*Ft' + Qt-Theta*inv∆t*Theta'
+    v = Y[2]-hatY[1]
+    
+    LL[2] = (1/2)*(v^2)
+    
+    for t in 2:(n-1)
+        Xtt = hatX + Ω*Gt'*inv∆t*v
+        dGt = dG_t2(t, vec(hatθ), m)
+        dvt = -hatX'*dGt
+        if norm(dvt) > 0.0
+            ∇t = -dvt*inv∆t*v
+            It = dvt.^2*inv∆t
+            st = It.^(-1/2).*∇t
+        else
+            st = 0
+        end
+        hatθ[:,t+1] .= ω .+ A*st .+ B*hatθ[:,t]
+        Gt = G_t2(t+1, vec(hatθ), m)
+        
+        if t<=m
+            Theta = Ft*Ω*Gt'
+            Ω = Ft*Ω*Ft' + Qt - Theta*inv∆t*Theta'
+        elseif t==m+1
+            Ω = Qt
+        end
+        
+        hatX = Ft*Xtt
+        hatY = Gt*hatX
+        v = Y[t+1] - hatY[1]
+        LL[t+1] = (1/2)*(v^2)
+    end
+    LL2 = sum(LL)
+    return n*log(σ)+ LL2*inv∆t
+end
+
+### function to obtain the score-driven-KF estimators
+
+function EstimacionMV(Pi::Vector{Float64}, Pm::Vector{Float64}, PM::Vector{Float64}, Y::Vector{Float64}, n::Int64, m::Int64)
+    Ft = [zeros(1,m) 0;Matrix{Float64}(I, m, m) zeros(m,1)]
+    Qt = zeros(m+1,m+1)
+    opt = Opt(:LN_BOBYQA, length(Pi))
+    lower_bounds!(opt, Pm)
+    upper_bounds!(opt, PM)
+    min_objective!(opt, (Pi, grad) -> TVMA_KalmanOF2(Pi, grad, Y, n, m, Ft, Qt))
+    maxeval!(opt, 800)  # Limita las evaluaciones
+    # Resolver el problema
+    (NLV, P_opt, status) = optimize(opt, Pi)
+    return Dict("Parámetros" => P_opt, "Log-Verosimilitud" => -NLV)
+end
+
+#### simulation study
+
+ Parámetros Escenario 1
+ωr1 = 0.05; Ar1 = 0.2; Br1 = 0.3; σr1 = 2.0
+Pr1 = [ωr1;Ar1;Br1;σr1]
+# Valores iniciales
+Pi1 = [0.03;0.15;0.4;1.0]
+
+# Parámetros Escenario 2
+ωr2 = 0.15; Ar2 = 0.3; Br2 = 0.15; σr2 = 1.0
+Pr2 = [ωr2;Ar2;Br2;σr2]
+# Valores iniciales
+Pi2 = [0.1;0.15;0.2;1.5]
+
+# Parámetros Escenario 3
+ωr3 = 0.1; Ar3 = 0.15; Br3 = 0.2; σr3 = 1.5
+Pr3 = [ωr3;Ar3;Br3;σr3]
+# Valores iniciales
+Pi3 = [0.05;0.1;0.1;1.0]
+
+# Parámetros Mínimos y máximos
+Pm1 = [0.4*ωr1, Ar1*0.4, 0.4*Br1,0.4*σr1]
+PM1 = [1.6*ωr1, Ar1*1.6, 1.6*Br1,1.6*σr1]
+
+Pm2 = [0.4*ωr2, 0.4*Ar2, 0.4*Br2,0.4*σr2]
+PM2 = [1.6*ωr2, 1.6*Ar2, 1.6*Br2,1.6*σr2]
+
+Pm3 = [0.4*ωr3, 0.4*Ar3, 0.4*Br3,0.4*σr3]
+PM3 = [1.6*ωr3, 1.6*Ar3, 1.6*Br3,1.6*σr3]
+
+############################### Inicio del estudio ############################### 
+N = 1000; n = 1000; m = 10
+# Matrices que contengan las estimaciones por MV de cada escenario
+auxMV1 = zeros(N, 4)
+auxMV2 = zeros(N, 4)
+auxMV3 = zeros(N, 4)
+
+@time for i in 1:N    
+    ########## Escenario 1 ########## 
+    Sim1 = ARGAS1(n, σr1, ωr1, Ar1, Br1, 1000+i)
+    YR1 = vec(Sim1[:Y])
+    θR1 = vec(Sim1[:θ])
+
+    EstimacionP1 = EstimacionMV(Pi1, Pm1, PM1, YR1, n, m)
+    hatP1 = EstimacionP1[:"Parámetros"]
+    auxMV1[i,:] .= hatP1
+    
+    ########## Escenario 2 ########## 
+    # Simulacion con los parámetros del escenerario 2
+    Sim2 = ARGAS1(n, σr2, ωr2, Ar2, Br2, i)
+    YR2 = vec(Sim2[:Y])
+    θR2 = vec(Sim2[:θ])
+    
+    EstimacionP2 = EstimacionMV(Pi2, Pm2, PM2, YR2, n, m)
+    hatP2 = EstimacionP2[:"Parámetros"]
+    auxMV2[i,:] .= hatP2 
+    
+    ########## Escenario 3 ########## 
+    # Simulacion con los parámetros del escenerario 2
+    Sim3 = ARGAS1(n, σr3, ωr3, Ar3, Br3, i)
+    YR3 = vec(Sim3[:Y])
+    θR3 = vec(Sim3[:θ])
+    
+    EstimacionP3 = EstimacionMV(Pi3, Pm3, PM3, YR3, n, m)
+    hatP3 = EstimacionP3[:"Parámetros"]
+    auxMV3[i,:] .= hatP3 
+end
+
+Estimaciones1_1 = auxMV1
+Estimaciones1_2 = auxMV2
+Estimaciones1_3 = auxMV3
+println("Terminó")
+
+######################### boxplot #########################
+# Cálculo de errores relativos
+Par11_C1 = (ωr1 .- Estimaciones1_1[:, 1])./ωr1
+Par21_C1 = (Ar1 .- Estimaciones1_1[:, 2])./Ar1
+Par31_C1 = (Br1 .- Estimaciones1_1[:, 3])./Br1
+Par41_C1 = (σr1 .- Estimaciones1_1[:, 4])./σr1
+
+datMV1 = hcat(Par11_C1, Par21_C1, Par31_C1, Par41_C1)
+
+p1 = boxplot(
+    [datMV1[:, 1] datMV1[:, 2] datMV1[:, 3] datMV1[:, 4]],
+    legend=false,
+    xlabel="",
+    ylabel="Error Relativo",
+    xticks=(1:4,  [L"$\omega$", L"$A$", L"$B$", L"$\sigma$"]),
+    ylims=(-1.5, 1.5),
+    fillalpha=1,
+    title="Escenario 1",
+    outliers=false,
+    ygrid = true,              
+    ygridalpha = 0.5,         
+    ygridstyle = :dash,        
+    yminorgrid = true,          
+    yminorgridalpha = 0.2,     
+    yminorgridstyle = :dash,
+    guidefont = 10,
+    fill = :white,
+    linecolor=[:red :darkorange  :teal :darkmagenta],
+    titlefont=16,
+    frame=:box,
+    framestyle=:frame,
+    ytickfont = font(7),
+    xtickfont = font(11) 
+    )
+# Organizar los gráficos en un panel
+boxplot1 = plot(p1)
+display(boxplot1)
+
+
+######################### boxplot #########################
+# Cálculo de errores relativos
+Par11_C1 = (ωr2 .- Estimaciones1_2[:, 1])./ωr2
+Par21_C1 = (Ar2 .- Estimaciones1_2[:, 2])./Ar2
+Par31_C1 = (Br2 .- Estimaciones1_2[:, 3])./Br2
+Par41_C1 = (σr2 .- Estimaciones1_2[:, 4])./σr2
+
+datMV1 = hcat(Par11_C1, Par21_C1, Par31_C1, Par41_C1)
+
+p1 = boxplot(
+    [datMV1[:, 1] datMV1[:, 2] datMV1[:, 3] datMV1[:, 4]],
+    legend=false,
+    xlabel="",
+    ylabel="Error Relativo",
+    xticks=(1:4,  [L"$\omega$", L"$A$", L"$B$", L"$\sigma$"]),
+    ylims=(-1.5, 1.5),
+    fillalpha=1,
+    title="Escenario 2",
+    outliers=false,
+    ygrid = true,              
+    ygridalpha = 0.5,         
+    ygridstyle = :dash,        
+    yminorgrid = true,          
+    yminorgridalpha = 0.2,     
+    yminorgridstyle = :dash,
+    guidefont = 10,
+    fill = :white,
+    linecolor=[:red :darkorange  :teal :darkmagenta],
+    titlefont=16,
+    frame=:box,
+    framestyle=:frame,
+    ytickfont = font(7),
+    xtickfont = font(11) 
+    )
+# Organizar los gráficos en un panel
+boxplot1 = plot(p1)
+display(boxplot1)
+
+######################### boxplot #########################
+# Cálculo de errores relativos
+Par11_C1 = (ωr3 .- Estimaciones1_3[:, 1])./ωr3
+Par21_C1 = (Ar3 .- Estimaciones1_3[:, 2])./Ar3
+Par31_C1 = (Br3 .- Estimaciones1_3[:, 3])./Br3
+Par41_C1 = (σr3 .- Estimaciones1_3[:, 4])./σr3
+
+datMV1 = hcat(Par11_C1, Par21_C1, Par31_C1, Par41_C1)
+
+p1 = boxplot(
+    [datMV1[:, 1] datMV1[:, 2] datMV1[:, 3] datMV1[:, 4]],
+    legend=false,
+    xlabel="",
+    ylabel="Error Relativo",
+    xticks=(1:4,  [L"$\omega$", L"$A$", L"$B$", L"$\sigma$"]),
+    ylims=(-1.5, 1.5),
+    fillalpha=1,
+    title="Escenario 3",
+    outliers=false,
+    ygrid = true,              
+    ygridalpha = 0.5,         
+    ygridstyle = :dash,        
+    yminorgrid = true,          
+    yminorgridalpha = 0.2,     
+    yminorgridstyle = :dash,
+    guidefont = 10,
+    fill = :white,
+    linecolor=[:red :darkorange  :teal :darkmagenta],
+    titlefont=16,
+    frame=:box,
+    framestyle=:frame,
+    ytickfont = font(7),
+    xtickfont = font(11) 
+    )
+# Organizar los gráficos en un panel
+boxplot1 = plot(p1)
+display(boxplot1)
+
+rintln("------------------------------------------------")
+println("Resumen de Estimación de Parámetros Escenario 1:")
+println("ω = 0.05; A = 0.2; B = 0.3; σ = 2.0")
+println("------------------------------------------------")
+R"""
+print(summary($Estimaciones1_1[,1]))
+print(summary($Estimaciones1_1[,2]))
+print(summary($Estimaciones1_1[,3]))
+print(summary($Estimaciones1_1[,4]))
+"""
+println("------------------------------------------------")
+
+
+println("------------------------------------------------")
+println("Resumen de Estimación de Parámetros Escenario 2:")
+println("ω = 0.15; A = 0.3; B = 0.15; σ = 1.0")
+println("------------------------------------------------")
+R"""
+print(summary($Estimaciones1_2[,1]))
+print(summary($Estimaciones1_2[,2]))
+print(summary($Estimaciones1_2[,3]))
+print(summary($Estimaciones1_2[,4]))
+"""
+println("------------------------------------------------")
+
+
+println("------------------------------------------------")
+println("Resumen de Estimación de Parámetros Escenario 3:")
+println("ω = 0.1; A = 0.15; B = 0.2; σ = 1.5")
+println("------------------------------------------------")
+R"""
+print(summary($Estimaciones1_3[,1]))
+print(summary($Estimaciones1_3[,2]))
+print(summary($Estimaciones1_3[,3]))
+print(summary($Estimaciones1_3[,4]))
+"""
+println("------------------------------------------------")
+
+SD de las estimaciones
+println("------ Escenario 1 ------")
+println("ω: ",std(Estimaciones1_1[:, 1]))
+println("A: ",std(Estimaciones1_1[:, 2]))
+println("B: ",std(Estimaciones1_1[:, 3]))
+println("σ: ",std(Estimaciones1_1[:, 4]))
+println("------ Escenario 2 ------")
+println("ω: ",std(Estimaciones1_2[:, 1]))
+println("A: ",std(Estimaciones1_2[:, 2]))
+println("B: ",std(Estimaciones1_2[:, 3]))
+println("σ: ",std(Estimaciones1_2[:, 4]))
+println("------ Escenario 3 ------")
+println("ω: ",std(Estimaciones1_3[:, 1]))
+println("A: ",std(Estimaciones1_3[:, 2]))
+println("B: ",std(Estimaciones1_3[:, 3]))
+println("σ: ",std(Estimaciones1_3[:, 4]))
+
+Real bias
+
+println("------ Escenario 1 ------")
+println("ω: ",mean(Estimaciones1_1[:, 1] .- ωr1))
+println("A: ",mean(Estimaciones1_1[:, 2] .- Ar1))
+println("B: ",mean(Estimaciones1_1[:, 3] .- Br1))
+println("σ: ",mean(Estimaciones1_1[:, 4] .- σr1))
+
+println("------ Escenario 2 ------")
+println("ω: ",mean(Estimaciones1_2[:, 1] .- ωr2))
+println("A: ",mean(Estimaciones1_2[:, 2] .- Ar2))
+println("B: ",mean(Estimaciones1_2[:, 3] .- Br2))
+println("σ: ",mean(Estimaciones1_2[:, 4] .- σr2))
+
+println("------ Escenario 3 ------")
+println("ω: ",mean(Estimaciones1_3[:, 1] .- ωr3))
+println("A: ",mean(Estimaciones1_3[:, 2] .- Ar3))
+println("B: ",mean(Estimaciones1_3[:, 3] .- Br3))
+println("σ: ",mean(Estimaciones1_3[:, 4] .- σr3))
+
+sqrt(Mean square error)
+
+println("------ Escenario 1 ------")
+println("ω: ",sqrt(sum(Estimaciones1_1[:, 1].- ωr1)^2/N))
+println("A: ",sqrt(sum(Estimaciones1_1[:, 2].- Ar1)^2/N))
+println("B: ",sqrt(sum(Estimaciones1_1[:, 3].- Br1)^2/N))
+println("σ: ",sqrt(sum(Estimaciones1_1[:, 4].- σr1)^2/N))
+
+println("------ Escenario 2 ------")
+println("ω: ",sqrt(sum(Estimaciones1_2[:, 1].- ωr2)^2/N))
+println("A: ",sqrt(sum(Estimaciones1_2[:, 2].- Ar2)^2/N))
+println("B: ",sqrt(sum(Estimaciones1_2[:, 3].- Br2)^2/N))
+println("σ: ",sqrt(sum(Estimaciones1_2[:, 4].- σr2)^2/N))
+
+println("------ Escenario 3 ------")
+println("ω: ",sqrt(sum(Estimaciones1_3[:, 1].- ωr3)^2/N))
+println("A: ",sqrt(sum(Estimaciones1_3[:, 2].- Ar3)^2/N))
+println("B: ",sqrt(sum(Estimaciones1_3[:, 3].- Br3)^2/N))
+println("σ: ",sqrt(sum(Estimaciones1_3[:, 4].- σr3)^2/N))
